@@ -365,7 +365,8 @@ class DimmingRunner(ClickRunner):
         if step.get("action") != "light.turn_on":
             return super().action(step)
         entity = self.render(step["target"]["entity_id"])
-        data = {key: self.render(value) for key, value in step["data"].items()}
+        data = (self.render(step["data"]) if isinstance(step["data"], str)
+                else {key: self.render(value) for key, value in step["data"].items()})
         self.calls.append({"entity": entity, "data": data, "at": self.clock})
         self.clock = round(self.clock + self.service_latency, 6)
         while self.pending and self.pending[0][0] <= self.clock:
@@ -403,6 +404,15 @@ class BlueprintDimmingTests(unittest.TestCase):
         self.assertEqual([call["entity"] for call in ramps], ["light.one", "light.two"])
         self.assertAlmostEqual(ramps[0]["data"]["transition"], 205 / 255 * 3)
         self.assertAlmostEqual(ramps[1]["data"]["transition"], 105 / 255 * 3)
+
+    def test_color_temperature_follows_ramp_and_runs_when_brightness_is_maxed(self):
+        runner = self.runner({"light.one": ("on", 255)}, color_temp_dimming=True, warm_kelvin=2000, cold_kelvin=6000)
+        runner.registry["light.one"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=4000)
+        runner.run(native_event(0, "event.a1", "long_press"))
+        ramp, release = [call["data"] for call in runner.calls]
+        self.assertEqual((ramp["brightness"], ramp["color_temp_kelvin"]), (255, 6000))
+        self.assertAlmostEqual(ramp["transition"], 0.5 * 3)
+        self.assertEqual(release["color_temp_kelvin"], 5333)
 
     def test_multiple_lights_dim_down_from_their_own_levels(self):
         runner = self.runner({"light.one": ("on", 100), "light.two": ("on", 200)}, direction=2)

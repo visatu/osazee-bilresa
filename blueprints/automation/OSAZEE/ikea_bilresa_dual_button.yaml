@@ -1,5 +1,5 @@
 blueprint:
-  name: The ULTIMATE IKEA Bilresa Blueprint — 12 Gestures, Triple Clicks, Dual-Button Combos, Dimming & Multi-Remote Control
+  name: "[CT] The ULTIMATE IKEA Bilresa Blueprint — 12 Gestures, Triple Clicks, Dual-Button Combos, Dimming & Multi-Remote Control"
   description: |-
     Two buttons. A whole room of possibilities. Dimming, single, double and triple
     clicks, both-button clicks and holds, multiple remotes and multi-step actions
@@ -213,6 +213,38 @@ blueprint:
               step: 0.01
               unit_of_measurement: s
               mode: slider
+        color_temp_dimming:
+          name: Change color temperature while dimming
+          description: Ramp color temperature together with brightness, from the
+            warm limit at minimum brightness to the cold limit at maximum. Ignored
+            by lights without color temperature support. Off = brightness only.
+          default: false
+          selector:
+            boolean: {}
+        warm_kelvin:
+          name: Warm color temperature (minimum brightness)
+          description: Color temperature at 1% brightness. Used only when color
+            temperature dimming is on.
+          default: 2450
+          selector:
+            number:
+              min: 1500.0
+              max: 10000.0
+              step: 100.0
+              unit_of_measurement: K
+              mode: slider
+        cold_kelvin:
+          name: Cold color temperature (maximum brightness)
+          description: Color temperature at 100% brightness. Used only when color
+            temperature dimming is on.
+          default: 5000
+          selector:
+            number:
+              min: 1500.0
+              max: 6500.0
+              step: 100.0
+              unit_of_measurement: K
+              mode: slider
         release_transition_seconds:
           name: Release transition
           description: Transition used when stopping at the estimated brightness on
@@ -349,6 +381,9 @@ variables:
   scaled_ramp_time: !input brightness_ramp_seconds
   latency_compensation_offset: !input latency_compensation_seconds
   release_transition: !input release_transition_seconds
+  color_temp_dimming: !input color_temp_dimming
+  warm_kelvin: !input warm_kelvin
+  cold_kelvin: !input cold_kelvin
   cooldown_ms: !input cooldown_ms
   raw_triple_enabled: !input raw_triple_enabled
 triggers:
@@ -1114,7 +1149,14 @@ actions:
                   {%- if has_value(entity) and (dim_direction > 0 or is_state(entity, 'on')) -%}
                     {%- set start = 3 if is_state(entity, 'off') else state_attr(entity, 'brightness') | int(0) -%}
                     {%- set start = [[start, 0] | max, 255] | min -%}
-                    {%- set ns.lights = ns.lights + [{'entity_id': entity, 'brightness': start}] -%}
+                    {%- set ct = color_temp_dimming and 'color_temp' in (state_attr(entity, 'supported_color_modes') or []) -%}
+                    {%- set k0 = state_attr(entity, 'color_temp_kelvin') or (warm_kelvin + (cold_kelvin - warm_kelvin) * start / 255) -%}
+                    {%- set k1 = cold_kelvin if dim_direction > 0 else warm_kelvin -%}
+                    {%- set rem_b = ((255 - start) if dim_direction > 0 else start) / 255 -%}
+                    {%- set rem_k = ((k1 - k0) * dim_direction / ([cold_kelvin - warm_kelvin, 1] | max)) if ct else 0 -%}
+                    {%- set dur = ([rem_b, rem_k, 0.004] | max) * scaled_ramp_time -%}
+                    {%- set rate = (((255 - start) if dim_direction > 0 else (start - 1)) | abs) / dur if ct else 255 / scaled_ramp_time -%}
+                    {%- set ns.lights = ns.lights + [{'entity_id': entity, 'brightness': start, 'ct': ct, 'kelvin': k0, 'duration': dur, 'rate': rate}] -%}
                   {%- endif -%}
                 {%- endfor -%}
                 {{ ns.lights }}
@@ -1134,8 +1176,8 @@ actions:
                   continue_on_error: true
                   target:
                     entity_id: '{{ repeat.item.entity_id }}'
-                  data:
-                    brightness_pct: 1
+                  data: >-
+                    {{ dict({'brightness_pct': 1}, **({'color_temp_kelvin': warm_kelvin | int} if repeat.item.ct else {})) }}
           - variables:
               hold_start_time: '{{ as_timestamp(now()) - latency_compensation_offset }}'
           - repeat:
@@ -1149,11 +1191,9 @@ actions:
                   continue_on_error: true
                   target:
                     entity_id: '{{ repeat.item.entity_id }}'
-                  data:
-                    brightness: '{{ 255 if dim_direction > 0 else 1 }}'
-                    transition: >-
-                      {{ ((255 - repeat.item.brightness) if dim_direction > 0
-                          else repeat.item.brightness) / 255 * scaled_ramp_time }}
+                  data: >-
+                    {{ dict({'brightness': 255 if dim_direction > 0 else 1, 'transition': repeat.item.duration},
+                            **({'color_temp_kelvin': (cold_kelvin if dim_direction > 0 else warm_kelvin) | int} if repeat.item.ct else {})) }}
           - alias: Start a bounded wait for the active button release
             variables:
               gesture_wait_completed: >-
@@ -1208,11 +1248,12 @@ actions:
                   continue_on_error: true
                   target:
                     entity_id: '{{ repeat.item.entity_id }}'
-                  data:
-                    brightness: >-
-                      {{ ([[repeat.item.brightness + dim_direction * 255 / scaled_ramp_time * dim_elapsed,
-                            0] | max, 255] | min) | round(0) | int }}
-                    transition: '{{ release_transition }}'
+                  data: >-
+                    {%- set p = [dim_elapsed / repeat.item.duration, 1] | min -%}
+                    {%- set k1 = cold_kelvin if dim_direction > 0 else warm_kelvin -%}
+                    {{ dict({'brightness': ([[repeat.item.brightness + dim_direction * repeat.item.rate * dim_elapsed, 0] | max, 255] | min) | round(0) | int,
+                            'transition': release_transition},
+                            **({'color_temp_kelvin': (repeat.item.kelvin + (k1 - repeat.item.kelvin) * p) | round(0) | int} if repeat.item.ct else {})) }}
       - conditions:
         - condition: template
           value_template: '{{ hold_mode == ''custom'' }}'
