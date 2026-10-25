@@ -414,6 +414,39 @@ class BlueprintDimmingTests(unittest.TestCase):
         self.assertAlmostEqual(ramp["transition"], 0.5 * 3)
         self.assertEqual(release["color_temp_kelvin"], 5333)
 
+    def test_double_click_steps_each_selected_light_and_skips_off_or_unsupported(self):
+        runner = self.runner({"light.one": ("on", 120), "light.two": ("on", 180),
+                              "light.off": ("off", 80), "light.no_color": ("on", 90)},
+                             color_temp_double_click_enabled=True, warm_kelvin=2450,
+                             cold_kelvin=5000, color_temp_double_click_step_kelvin=500)
+        runner.registry["light.one"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=3500)
+        runner.registry["light.two"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=4800)
+        runner.registry["light.off"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=3000)
+        runner.registry["light.no_color"].attributes.update(supported_color_modes=["brightness"], color_temp_kelvin=None)
+
+        runner.run(native_event(0, "event.a1", "multi_press_2"))
+
+        self.assertEqual([(call["entity"], call["data"]["color_temp_kelvin"])
+                  for call in runner.calls], [("light.one", 4000), ("light.two", 5000)])
+        self.assertEqual([call["data"]["transition"] for call in runner.calls], [0.5, 0.5])
+        self.assertEqual(runner.registry["light.off"].state, "off")
+
+        warmer = self.runner({"light.one": ("on", 120), "light.two": ("on", 180)},
+                     direction=2, color_temp_double_click_enabled=True,
+                     warm_kelvin=2450, cold_kelvin=5000,
+                     color_temp_double_click_step_kelvin=500)
+        warmer.registry["light.one"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=3500)
+        warmer.registry["light.two"].attributes.update(supported_color_modes=["color_temp"], color_temp_kelvin=4800)
+        warmer.run(native_event(0, "event.a2", "multi_press_2"))
+        self.assertEqual([(call["entity"], call["data"]["color_temp_kelvin"])
+              for call in warmer.calls], [("light.one", 3000), ("light.two", 4300)])
+
+    def test_double_click_uses_existing_actions_when_color_stepping_is_disabled(self):
+        runner = self.runner({"light.one": ("on", 120)}, color_temp_double_click_enabled=False)
+        self.assertEqual(runner.run(native_event(0, "event.a1", "multi_press_2")),
+                         ["double_button_1_action"])
+        self.assertEqual(runner.calls, [])
+
     def test_multiple_lights_dim_down_from_their_own_levels(self):
         runner = self.runner({"light.one": ("on", 100), "light.two": ("on", 200)}, direction=2)
         runner.run(native_event(0, "event.a2", "long_press"))
@@ -453,8 +486,8 @@ class BlueprintDimmingTests(unittest.TestCase):
         self.assertEqual({call["entity"] for call in runner.calls}, {"light.two"})
         self.assertEqual(runner.registry["light.one"].state, "off")
 
-    def test_brightness_stays_between_zero_and_255(self):
-        for direction, expected in ((1, 255), (2, 0)):
+    def test_brightness_stays_between_one_and_255(self):
+        for direction, expected in ((1, 255), (2, 1)):
             runner = self.runner({"light.one": ("on", 128)}, direction, release=5)
             runner.run(native_event(0, f"event.a{direction}", "long_press"))
             self.assertEqual(runner.final_brightness(), {"light.one": expected})

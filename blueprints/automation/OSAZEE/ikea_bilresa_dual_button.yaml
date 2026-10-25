@@ -12,6 +12,9 @@ blueprint:
     - Every assignment accepts multiple Home Assistant actions in order: lights,
       plugs, covers, scenes, scripts and more. Use Add action to extend a sequence;
       an empty list does nothing. No personal devices or actions are preassigned.
+    - Optional color-temperature double clicks step the selected lights warmer with
+      Button 1 and cooler with Button 2. When enabled, these replace the two individual
+      double-click action lists; both-button double-click actions are unaffected.
     - Recognized combined gestures select the combined sequence instead of the
       individual sequences. Different remotes are never combined. A combined double
       click requires two multi_press_2 events within the recognition window, then
@@ -168,20 +171,19 @@ blueprint:
                       reorder: false
                       multiple: false
     dimming:
-      name: Dimming settings (Light dimming only)
-      description: Used only when Single-button hold behavior is Light dimming. Select
-        one or more dimmable lights in that mode. Leave this section empty when using Custom
-        actions.
+      name: Light settings
+      description: Select lights for Light dimming or optional built-in double-click
+        color-temperature steps. Leave the selection empty if neither feature is used.
       icon: mdi:brightness-6
       collapsed: true
       input:
         light_entity:
-          name: Lights to dim
-          description: Optional in Custom actions mode; required to use Light dimming.
-            Add one or more dimmable light entities. Each light dims from its own
-            starting brightness; unavailable lights are skipped. Brightening turns
-            previously off lights on at 1%; dimming down leaves off lights off. Existing single
-            selections remain supported. This selection does not assign click actions.
+          name: Lights to control
+          description: Add one or more dimmable lights for Light dimming or color-temperature
+            double-clicks. Each light uses its own brightness and color temperature.
+            Unavailable lights are skipped; color steps skip lights that are off or
+            lack color-temperature support. Existing single selections remain supported.
+            This selection does not assign click actions.
           default: []
           selector:
             entity:
@@ -222,9 +224,9 @@ blueprint:
           selector:
             boolean: {}
         warm_kelvin:
-          name: Warm color temperature (minimum brightness)
-          description: Color temperature at 1% brightness. Used only when color
-            temperature dimming is on.
+          name: Warm color temperature limit
+          description: Warm endpoint for color-temperature dimming and double-click
+            stepping.
           default: 2450
           selector:
             number:
@@ -234,9 +236,9 @@ blueprint:
               unit_of_measurement: K
               mode: slider
         cold_kelvin:
-          name: Cold color temperature (maximum brightness)
-          description: Color temperature at 100% brightness. Used only when color
-            temperature dimming is on.
+          name: Cold color temperature limit
+          description: Cold endpoint for color-temperature dimming and double-click
+            stepping.
           default: 5000
           selector:
             number:
@@ -244,6 +246,37 @@ blueprint:
               max: 6500.0
               step: 100.0
               unit_of_measurement: K
+              mode: slider
+        color_temp_double_click_enabled:
+          name: Use double-clicks to adjust color temperature
+          description: Button 1 steps selected lights cooler; Button 2 steps them
+            warmer. Uses the warm and cold limits above. When off, configured double-click
+            actions run as usual. Lights that are off or do not support color temperature
+            are skipped.
+          default: false
+          selector:
+            boolean: {}
+        color_temp_double_click_step_kelvin:
+          name: Double-click color temperature step
+          description: Kelvin change per double-click, shared by all selected lights.
+          default: 500
+          selector:
+            number:
+              min: 100.0
+              max: 1000.0
+              step: 100.0
+              unit_of_measurement: K
+              mode: slider
+        color_temp_double_click_transition_seconds:
+          name: Double-click color temperature transition
+          description: Fade duration for each built-in color-temperature step.
+          default: 0.5
+          selector:
+            number:
+              min: 0.0
+              max: 5.0
+              step: 0.1
+              unit_of_measurement: s
               mode: slider
         release_transition_seconds:
           name: Release transition
@@ -384,6 +417,9 @@ variables:
   color_temp_dimming: !input color_temp_dimming
   warm_kelvin: !input warm_kelvin
   cold_kelvin: !input cold_kelvin
+  color_temp_double_click_enabled: !input color_temp_double_click_enabled
+  color_temp_double_click_step_kelvin: !input color_temp_double_click_step_kelvin
+  color_temp_double_click_transition: !input color_temp_double_click_transition_seconds
   cooldown_ms: !input cooldown_ms
   raw_triple_enabled: !input raw_triple_enabled
 triggers:
@@ -737,7 +773,35 @@ actions:
               - stop: Button 2 triple click handled once.
         - sequence: !input double_both_action
         - stop: Combined double click handled once.
-    - sequence: !input double_button_1_action
+    - variables:
+        color_temp_step_direction: -1
+    - choose:
+      - conditions:
+        - condition: template
+          value_template: '{{ color_temp_double_click_enabled }}'
+        sequence: &color_temp_double_click_steps
+        - if:
+          - condition: template
+            value_template: '{{ not dimming_light_entities }}'
+          then:
+          - stop: Color temperature double-clicks require at least one light in Lights to control.
+            error: true
+        - repeat:
+            for_each: '{{ dimming_light_entities }}'
+            sequence:
+            - if:
+              - condition: template
+                value_template: "{{ has_value(repeat.item) and is_state(repeat.item, 'on') and 'color_temp' in (state_attr(repeat.item, 'supported_color_modes') or []) }}"
+              then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: '{{ repeat.item }}'
+                data:
+                  transition: '{{ color_temp_double_click_transition }}'
+                  color_temp_kelvin: "{{ [[state_attr(repeat.item, 'color_temp_kelvin') | int(cold_kelvin if color_temp_step_direction > 0 else warm_kelvin) - color_temp_step_direction * color_temp_double_click_step_kelvin, warm_kelvin] | max, cold_kelvin] | min }}"
+      default:
+      - sequence: !input double_button_1_action
   - conditions:
     - condition: template
       value_template: '{{ gesture == ''double_down'' }}'
@@ -948,7 +1012,15 @@ actions:
               - stop: Button 2 triple click handled once.
         - sequence: !input double_both_action
         - stop: Combined double click handled once.
-    - sequence: !input double_button_2_action
+    - variables:
+        color_temp_step_direction: 1
+    - choose:
+      - conditions:
+        - condition: template
+          value_template: '{{ color_temp_double_click_enabled }}'
+        sequence: *color_temp_double_click_steps
+      default:
+      - sequence: !input double_button_2_action
   - conditions:
     - condition: template
       value_template: '{{ gesture == ''native_triple_up'' }}'
@@ -1251,7 +1323,7 @@ actions:
                   data: >-
                     {%- set p = [dim_elapsed / repeat.item.duration, 1] | min -%}
                     {%- set k1 = cold_kelvin if dim_direction > 0 else warm_kelvin -%}
-                    {{ dict({'brightness': ([[repeat.item.brightness + dim_direction * repeat.item.rate * dim_elapsed, 0] | max, 255] | min) | round(0) | int,
+                    {{ dict({'brightness': ([[repeat.item.brightness + dim_direction * repeat.item.rate * dim_elapsed, 1] | max, 255] | min) | round(0) | int,
                             'transition': release_transition},
                             **({'color_temp_kelvin': (repeat.item.kelvin + (k1 - repeat.item.kelvin) * p) | round(0) | int} if repeat.item.ct else {})) }}
       - conditions:
