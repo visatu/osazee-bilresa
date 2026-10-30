@@ -1,0 +1,9 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python -B -m unittest discover -s tests 2>&1 \\| tail -15$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        ".venv/bin/python": true
+    }
+}
